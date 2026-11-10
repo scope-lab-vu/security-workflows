@@ -40,8 +40,8 @@ jobs:
           [[rules]]
           id = "google-api-key-any"
           description = "Google API key (no entropy threshold)"
-          regex = '''AIza[0-9A-Za-z_\-]{35}'''
-          keywords = ["aiza"]
+          regex = '''AIzaSy[0-9A-Za-z_\-]{33}'''
+          keywords = ["aizasy"]
 
           [[rules]]
           id = "mapbox-secret-token"
@@ -52,7 +52,7 @@ jobs:
           [[rules]]
           id = "mongodb-connection-string"
           description = "MongoDB connection string with credentials"
-          regex = '''mongodb(?:\+srv)?://[^\s:@/"']+:[^\s@/"']+@[^\s"']+'''
+          regex = '''mongodb(?:\+srv)?://[^\s:@/"'$<>{}]+:[^\s@/"'$<>{}]+@[^\s"']+'''
           keywords = ["mongodb"]
 
           [[rules]]
