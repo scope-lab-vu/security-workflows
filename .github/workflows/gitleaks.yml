@@ -30,14 +30,52 @@ jobs:
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
           sudo mv gitleaks /usr/local/bin/
 
+      - name: Write gitleaks config
+        # Default rules plus rules for secrets the defaults miss (found in org history).
+        run: |
+          cat > "$RUNNER_TEMP/gitleaks.toml" <<'TOML'
+          [extend]
+          useDefault = true
+
+          [[rules]]
+          id = "google-api-key-any"
+          description = "Google API key (no entropy threshold)"
+          regex = '''AIza[0-9A-Za-z_\-]{35}'''
+          keywords = ["aiza"]
+
+          [[rules]]
+          id = "mapbox-secret-token"
+          description = "Mapbox secret access token"
+          regex = '''sk\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'''
+          keywords = ["sk.eyj"]
+
+          [[rules]]
+          id = "mongodb-connection-string"
+          description = "MongoDB connection string with credentials"
+          regex = '''mongodb(?:\+srv)?://[^\s:@/"']+:[^\s@/"']+@[^\s"']+'''
+          keywords = ["mongodb"]
+
+          [[rules]]
+          id = "docker-swarm-join-token"
+          description = "Docker Swarm join token"
+          regex = '''SWMTKN-1-[a-z0-9]{50}-[a-z0-9]{25}'''
+          keywords = ["swmtkn"]
+
+          [[rules]]
+          id = "http-basic-auth-header"
+          description = "HTTP basic authentication header"
+          regex = '''(?i)authorization["']?\s*[:=]\s*["']?basic\s+[A-Za-z0-9+/]{8,}={0,2}'''
+          keywords = ["basic"]
+          TOML
+
       - name: Scan PR commits
         if: github.event_name == 'pull_request'
         run: |
-          gitleaks git . --redact --verbose \
+          gitleaks git . --config "$RUNNER_TEMP/gitleaks.toml" --redact --verbose \
             --log-opts="--max-count=${{ github.event.pull_request.commits }}"
 
       - name: Scan merge group
         if: github.event_name == 'merge_group'
         run: |
-          gitleaks git . --redact --verbose \
+          gitleaks git . --config "$RUNNER_TEMP/gitleaks.toml" --redact --verbose \
             --log-opts="${{ github.event.merge_group.base_sha }}..${{ github.event.merge_group.head_sha }}"
