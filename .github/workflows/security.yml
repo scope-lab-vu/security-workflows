@@ -1,0 +1,199 @@
+name: security
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+# A new push to the same PR cancels the run in progress.
+concurrency:
+  group: org-security-required-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      OSV_SCANNER_VERSION: 2.7.1
+      OSV_SCANNER_SHA256: fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8
+      ZIZMOR_VERSION: 1.32.0
+      ZIZMOR_SHA256: bb110cc765eca9cd7efb2e284a956be5974c60027b0970f16397d86208a9957b
+    steps:
+      - name: Resolve commit range
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            { echo "PR_NUMBER=$PR_NUMBER"; echo "BASE_SHA=$PR_BASE"; echo "HEAD_SHA=$PR_HEAD"
+              echo "FETCH_DEPTH=$PR_COMMITS"; echo "LOG_OPTS=--max-count=$PR_COMMITS"; } >> "$GITHUB_ENV"
+          else
+            { echo "PR_NUMBER="; echo "BASE_SHA=$MG_BASE"; echo "HEAD_SHA=$MG_HEAD"
+              echo "FETCH_DEPTH=0"; echo "LOG_OPTS=$MG_BASE..$MG_HEAD"; } >> "$GITHUB_ENV"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: ${{ env.FETCH_DEPTH }}
+          persist-credentials: false
+
+      - name: Fetch base commit
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)" \
+            fetch -q --depth=1 "https://github.com/$REPO" "$BASE_SHA"
+          git worktree add -q --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+
+      - name: Install tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          curl -sSfLo gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfLo osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          curl -sSfLo zizmor.tar.gz "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          sha256sum -c - <<EOF
+          ${GITLEAKS_SHA256}  gitleaks.tar.gz
+          ${OSV_SCANNER_SHA256}  osv-scanner
+          ${ZIZMOR_SHA256}  zizmor.tar.gz
+          EOF
+          tar xzf gitleaks.tar.gz gitleaks && tar xzf zizmor.tar.gz zizmor && rm ./*.tar.gz
+          chmod +x gitleaks osv-scanner zizmor
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Write gitleaks config
+        # Default rules plus rules for secrets the defaults miss (found in org history).
+        run: |
+          cat > "$RUNNER_TEMP/gitleaks.toml" <<'TOML'
+          [extend]
+          useDefault = true
+
+          [[rules]]
+          id = "google-api-key-any"
+          description = "Google API key (no entropy threshold)"
+          regex = '''AIzaSy[0-9A-Za-z_\-]{33}'''
+          keywords = ["aizasy"]
+
+          [[rules]]
+          id = "mapbox-secret-token"
+          description = "Mapbox secret access token"
+          regex = '''sk\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'''
+          keywords = ["sk.eyj"]
+
+          [[rules]]
+          id = "mongodb-connection-string"
+          description = "MongoDB connection string with credentials"
+          regex = '''mongodb(?:\+srv)?://[^\s:@/"'$<>{}]+:[^\s@/"'$<>{}]+@[^\s"']+'''
+          keywords = ["mongodb"]
+
+          [[rules]]
+          id = "docker-swarm-join-token"
+          description = "Docker Swarm join token"
+          regex = '''SWMTKN-1-[a-z0-9]{50}-[a-z0-9]{25}'''
+          keywords = ["swmtkn"]
+
+          [[rules]]
+          id = "http-basic-auth-header"
+          description = "HTTP basic authentication header"
+          regex = '''(?i)authorization["']?\s*[:=]\s*["']?basic\s+[A-Za-z0-9+/]{8,}={0,2}'''
+          keywords = ["basic"]
+
+          [[rules]]
+          id = "dotenv-file"
+          description = "Committed .env file (including .env.example templates); add a .gitleaksignore entry if it only has placeholders"
+          path = '''(?:^|/)\.env[^/]*$'''
+
+          [[rules]]
+          id = "viriciti-api-key"
+          description = "ViriCiti API key or websocket token"
+          regex = '''(?i)(?:viriciti\w*key|expose\.viriciti\.com\S*token=)\W{0,5}([0-9a-z\-]{16,})'''
+          keywords = ["viriciti"]
+
+          [[rules]]
+          id = "gurobi-wls-credential"
+          description = "Gurobi Web License Service access ID or secret"
+          regex = '''(?i)WLS(?:SECRET|ACCESSID)\W{0,6}([0-9a-f\-]{20,})'''
+          keywords = ["wlssecret", "wlsaccessid"]
+
+          [[rules]]
+          id = "transit-feed-token"
+          description = "Transit data feed token (BusTime/Clever API key or connToken)"
+          regex = '''(?i)(?:connToken|bustime\w*key)\s*[=:]\s*["']?([A-Za-z0-9]{16,40})["']?'''
+          keywords = ["conntoken", "bustime"]
+          TOML
+
+      # Secrets in any commit of this PR.
+      - name: gitleaks
+        id: gitleaks
+        continue-on-error: true
+        run: |
+          gitleaks git . --config "$RUNNER_TEMP/gitleaks.toml" --max-target-megabytes 5 \
+            --redact --verbose --log-opts="$LOG_OPTS"
+
+      # Fails only on vulnerabilities this PR adds (head minus base). Compared by
+      # package + advisory, not version, so upgrading to a still-affected version passes.
+      - name: osv-scanner (new vulnerabilities only)
+        id: osv
+        continue-on-error: true
+        run: |
+          scan() { osv-scanner scan source -r --format json --output "$2" "$1" >/dev/null 2>&1 || true
+                   [ -s "$2" ] || echo '{"results":[]}' > "$2"; }
+          keys() { jq -r '.results[]?.packages[]? | . as $p | $p.vulnerabilities[]? |
+                     "\($p.package.ecosystem) \($p.package.name) \(.id)"' "$1" | sort -u; }
+          scan . "$RUNNER_TEMP/head.json"
+          scan "$RUNNER_TEMP/base" "$RUNNER_TEMP/base.json"
+          new=$(comm -13 <(keys "$RUNNER_TEMP/base.json") <(keys "$RUNNER_TEMP/head.json"))
+          if [ -n "$new" ]; then
+            echo "Vulnerable dependencies introduced by this PR:"
+            echo "$new" | while read -r eco pkg id; do
+              detail=$(jq -r --arg e "$eco" --arg p "$pkg" --arg i "$id" '.results[]?.packages[]? |
+                select(.package.ecosystem==$e and .package.name==$p) | . as $x | .vulnerabilities[]? |
+                select(.id==$i) | "\($x.package.version) \(.summary // "")"' "$RUNNER_TEMP/head.json" | head -1)
+              echo "$eco $pkg@$detail ($id)"
+              echo "::error title=osv-scanner::$pkg@$detail ($eco, $id)"
+            done
+            exit 1
+          fi
+          echo "No new vulnerable dependencies."
+
+      # Lints only the workflow/action files this PR changes. All findings are
+      # annotated; only high severity (exit 14) fails. Tag pins (@v4) are accepted.
+      - name: zizmor (changed workflow files)
+        id: zizmor
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -n "$PR_NUMBER" ]; then
+            changed=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
+          else
+            changed=$(git diff --name-only --diff-filter=d "$BASE_SHA" "$HEAD_SHA")
+          fi
+          mapfile -t files < <(echo "$changed" |
+            grep -E '^\.github/workflows/[^/]+\.ya?ml$|(^|/)action\.ya?ml$' | while read -r f; do [ -f "$f" ] && echo "$f"; done)
+          if [ ${#files[@]} -eq 0 ]; then echo "No workflow files changed."; exit 0; fi
+          printf 'rules:\n  unpinned-uses:\n    config:\n      policies:\n        "*": ref-pin\n' > "$RUNNER_TEMP/zizmor.yml"
+          rc=0; zizmor --config "$RUNNER_TEMP/zizmor.yml" --format github "${files[@]}" || rc=$?
+          echo "zizmor exit code: $rc"
+          if [ "$rc" -eq 14 ]; then echo "High-severity findings: fix before merging."; exit 1; fi
+
+      - name: Result
+        env:
+          GITLEAKS: ${{ steps.gitleaks.outcome }}
+          OSV: ${{ steps.osv.outcome }}
+          ZIZMOR: ${{ steps.zizmor.outcome }}
+        run: |
+          echo "gitleaks=$GITLEAKS osv-scanner=$OSV zizmor=$ZIZMOR"
+          [ "$GITLEAKS" = success ] && [ "$OSV" = success ] && [ "$ZIZMOR" = success ]
