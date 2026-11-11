@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read # list the PR's changed files for zizmor
 
 # A new push to the same PR cancels the run in progress.
 concurrency:
@@ -32,10 +33,12 @@ jobs:
           PR_COMMITS: ${{ github.event.pull_request.commits }}
           MG_BASE: ${{ github.event.merge_group.base_sha }}
           MG_HEAD: ${{ github.event.merge_group.head_sha }}
+        # Fetch one commit beyond the PR so its oldest commit has a parent; otherwise
+        # git shows that commit as adding the entire tree and gitleaks scans the whole repo.
         run: |
           if [ "$EVENT" = pull_request ]; then
             { echo "PR_NUMBER=$PR_NUMBER"; echo "BASE_SHA=$PR_BASE"; echo "HEAD_SHA=$PR_HEAD"
-              echo "FETCH_DEPTH=$PR_COMMITS"; echo "LOG_OPTS=--max-count=$PR_COMMITS"; } >> "$GITHUB_ENV"
+              echo "FETCH_DEPTH=$((PR_COMMITS + 1))"; echo "LOG_OPTS=--max-count=$PR_COMMITS"; } >> "$GITHUB_ENV"
           else
             { echo "PR_NUMBER="; echo "BASE_SHA=$MG_BASE"; echo "HEAD_SHA=$MG_HEAD"
               echo "FETCH_DEPTH=0"; echo "LOG_OPTS=$MG_BASE..$MG_HEAD"; } >> "$GITHUB_ENV"
@@ -177,7 +180,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           if [ -n "$PR_NUMBER" ]; then
-            changed=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
+            changed=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')
           else
             changed=$(git diff --name-only --diff-filter=d "$BASE_SHA" "$HEAD_SHA")
           fi
