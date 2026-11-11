@@ -9,6 +9,7 @@ permissions:
 jobs:
   gitleaks:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout PR commits
         if: github.event_name == 'pull_request'
@@ -26,8 +27,11 @@ jobs:
       - name: Install gitleaks
         env:
           GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
         run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
+          curl -sSfLo gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar xzf gitleaks.tar.gz gitleaks
           sudo mv gitleaks /usr/local/bin/
 
       - name: Write gitleaks config
@@ -66,16 +70,39 @@ jobs:
           description = "HTTP basic authentication header"
           regex = '''(?i)authorization["']?\s*[:=]\s*["']?basic\s+[A-Za-z0-9+/]{8,}={0,2}'''
           keywords = ["basic"]
+
+          [[rules]]
+          id = "dotenv-file"
+          description = "Committed .env file (including .env.example templates); add a .gitleaksignore entry if it only has placeholders"
+          path = '''(?:^|/)\.env[^/]*$'''
+
+          [[rules]]
+          id = "viriciti-api-key"
+          description = "ViriCiti API key or websocket token"
+          regex = '''(?i)(?:viriciti\w*key|expose\.viriciti\.com\S*token=)\W{0,5}([0-9a-z\-]{16,})'''
+          keywords = ["viriciti"]
+
+          [[rules]]
+          id = "gurobi-wls-credential"
+          description = "Gurobi Web License Service access ID or secret"
+          regex = '''(?i)WLS(?:SECRET|ACCESSID)\W{0,6}([0-9a-f\-]{20,})'''
+          keywords = ["wlssecret", "wlsaccessid"]
+
+          [[rules]]
+          id = "transit-feed-token"
+          description = "Transit data feed token (BusTime/Clever API key or connToken)"
+          regex = '''(?i)(?:connToken|bustime\w*key)\s*[=:]\s*["']?([A-Za-z0-9]{16,40})["']?'''
+          keywords = ["conntoken", "bustime"]
           TOML
 
       - name: Scan PR commits
         if: github.event_name == 'pull_request'
         run: |
-          gitleaks git . --config "$RUNNER_TEMP/gitleaks.toml" --redact --verbose \
+          gitleaks git . --config "$RUNNER_TEMP/gitleaks.toml" --max-target-megabytes 5 --redact --verbose \
             --log-opts="--max-count=${{ github.event.pull_request.commits }}"
 
       - name: Scan merge group
         if: github.event_name == 'merge_group'
         run: |
-          gitleaks git . --config "$RUNNER_TEMP/gitleaks.toml" --redact --verbose \
+          gitleaks git . --config "$RUNNER_TEMP/gitleaks.toml" --max-target-megabytes 5 --redact --verbose \
             --log-opts="${{ github.event.merge_group.base_sha }}..${{ github.event.merge_group.head_sha }}"
