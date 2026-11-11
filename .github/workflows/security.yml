@@ -1,0 +1,108 @@
+name: security
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      OSV_SCANNER_VERSION: 2.7.1
+      ZIZMOR_VERSION: 1.32.0
+    steps:
+      - name: Resolve commit range
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            { echo "BASE_SHA=$PR_BASE"; echo "HEAD_SHA=$PR_HEAD"; echo "FETCH_DEPTH=$PR_COMMITS"
+              echo "LOG_OPTS=--max-count=$PR_COMMITS"; } >> "$GITHUB_ENV"
+          else
+            { echo "BASE_SHA=$MG_BASE"; echo "HEAD_SHA=$MG_HEAD"; echo "FETCH_DEPTH=0"
+              echo "LOG_OPTS=$MG_BASE..$MG_HEAD"; } >> "$GITHUB_ENV"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: ${{ env.FETCH_DEPTH }}
+          persist-credentials: false
+
+      - name: Fetch base commit
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)" \
+            fetch -q --depth=1 "https://github.com/$REPO" "$BASE_SHA"
+          git worktree add -q --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+
+      - name: Install tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
+          curl -sSfLo osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          curl -sSfL "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz" | tar xz zizmor
+          chmod +x gitleaks osv-scanner zizmor
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # Secrets in any commit of this PR.
+      - name: gitleaks
+        id: gitleaks
+        continue-on-error: true
+        run: gitleaks git . --redact --verbose --log-opts="$LOG_OPTS"
+
+      # Fails only on vulnerable dependencies this PR adds (head minus base).
+      - name: osv-scanner (new vulnerabilities only)
+        id: osv
+        continue-on-error: true
+        run: |
+          scan() { osv-scanner scan source -r --format json --output "$2" "$1" >/dev/null 2>&1 || true
+                   [ -s "$2" ] || echo '{"results":[]}' > "$2"; }
+          keys() { jq -r '.results[]?.packages[]? | . as $p | $p.vulnerabilities[]? |
+                     "\($p.package.ecosystem) \($p.package.name)@\($p.package.version) \(.id) \(.summary // "")"' "$1" | sort -u; }
+          scan . "$RUNNER_TEMP/head.json"
+          scan "$RUNNER_TEMP/base" "$RUNNER_TEMP/base.json"
+          new=$(comm -13 <(keys "$RUNNER_TEMP/base.json") <(keys "$RUNNER_TEMP/head.json"))
+          if [ -n "$new" ]; then
+            echo "Vulnerable dependencies introduced by this PR:"; echo "$new"
+            echo "$new" | while read -r eco pkg id rest; do echo "::error title=osv-scanner::$pkg ($eco) $id $rest"; done
+            exit 1
+          fi
+          echo "No new vulnerable dependencies."
+
+      # Lints only the workflow/action files this PR changes.
+      # All findings are annotated; only high severity (exit 14) fails.
+      # Tag pins (@v4) are accepted; only unpinned references are flagged.
+      - name: zizmor (changed workflow files)
+        id: zizmor
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t files < <(git diff --name-only --diff-filter=d "$BASE_SHA" "$HEAD_SHA" |
+            grep -E '^\.github/workflows/[^/]+\.ya?ml$|(^|/)action\.ya?ml$' || true)
+          if [ ${#files[@]} -eq 0 ]; then echo "No workflow files changed."; exit 0; fi
+          printf 'rules:\n  unpinned-uses:\n    config:\n      policies:\n        "*": ref-pin\n' > "$RUNNER_TEMP/zizmor.yml"
+          rc=0; zizmor --config "$RUNNER_TEMP/zizmor.yml" --format github "${files[@]}" || rc=$?
+          echo "zizmor exit code: $rc"
+          if [ "$rc" -eq 14 ]; then echo "High-severity findings: fix before merging."; exit 1; fi
+
+      - name: Result
+        env:
+          GITLEAKS: ${{ steps.gitleaks.outcome }}
+          OSV: ${{ steps.osv.outcome }}
+          ZIZMOR: ${{ steps.zizmor.outcome }}
+        run: |
+          echo "gitleaks=$GITLEAKS osv-scanner=$OSV zizmor=$ZIZMOR"
+          [ "$GITLEAKS" = success ] && [ "$OSV" = success ] && [ "$ZIZMOR" = success ]
