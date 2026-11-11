@@ -1,0 +1,1 @@
+VIRICITI_API_KEY = "30877432-d102-6706-d7e8-05da846a32c3"  # fake test value
