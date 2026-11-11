@@ -138,7 +138,7 @@ cat > ~/.git-hooks/pre-commit <<'EOF'
 # gitleaks on staged changes; org rules if present, else gitleaks defaults
 cfg="$HOME/gitleaks-org.toml"
 if [ -f "$cfg" ]; then set -- --config "$cfg"; else set --; fi
-if ! gitleaks git --pre-commit --staged --redact --verbose "$@"; then
+if ! gitleaks git --pre-commit --staged --no-banner --redact --verbose "$@"; then
   echo "gitleaks: secret in staged changes. Remove it, or use git commit --no-verify for a false positive."
   exit 1
 fi
