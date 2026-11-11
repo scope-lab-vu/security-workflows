@@ -123,6 +123,42 @@ Reports are redacted; the file, line and commit in each finding show where to lo
 
 For each real finding, follow [If a real secret is found](#if-a-real-secret-is-found).
 
+## Pre-commit hook (optional)
+
+Catch secrets on your machine before they reach GitHub. This installs one global git hook that scans staged changes in every repo you commit to. It uses `~/gitleaks-org.toml` from [Get the org rules](#scanning-your-own-repos) if present, otherwise the gitleaks default rules.
+
+<details>
+<summary>Install (once per machine)</summary>
+
+```bash
+brew install gitleaks
+mkdir -p ~/.git-hooks
+cat > ~/.git-hooks/pre-commit <<'EOF'
+#!/bin/sh
+# gitleaks on staged changes; org rules if present, else gitleaks defaults
+cfg="$HOME/gitleaks-org.toml"
+if [ -f "$cfg" ]; then set -- --config "$cfg"; else set --; fi
+if ! gitleaks git --pre-commit --staged --redact --verbose "$@"; then
+  echo "gitleaks: secret in staged changes. Remove it, or use git commit --no-verify for a false positive."
+  exit 1
+fi
+# A global hooksPath replaces the repo's own hooks; run its pre-commit too
+repo_hook="$(git rev-parse --git-dir)/hooks/pre-commit"
+[ -x "$repo_hook" ] && exec "$repo_hook"
+exit 0
+EOF
+chmod +x ~/.git-hooks/pre-commit
+git config --global core.hooksPath ~/.git-hooks
+```
+
+To uninstall: `git config --global --unset core.hooksPath`.
+
+</details>
+
+- `git commit --no-verify` skips it; the PR check still runs.
+- Repos that set their own `core.hooksPath` (e.g. Husky) override the global hook.
+- Re-run the "Get the org rules" command when the org rules change.
+
 ## Changing this workflow
 
 Changes go through a PR here; the ruleset applies to this repo too. To bump a tool, update its version and SHA-256 together in `security.yml` (from the release's checksums file, or the asset digest on the release page).
